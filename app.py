@@ -68,7 +68,7 @@ def find_col(candidates):
                         bind=alt.binding_select(options=opts, name="Disposición: "))
     dispo_expr = f"(p_dispo == '(Todas)') || (datum.{disp_col} == p_dispo)" if disp_col else None
 
-if menu == "Introducción:
+if menu == "Introducción":
     st.title("Introducción - Análisis de Exoplanetas")
 
 if menu == "Visualizaciones":
@@ -278,6 +278,7 @@ if menu == "Visualizaciones":
 if menu == "Predicción del modelo":
     st.title("Predicción del modelo")
     
+
 
 
 
