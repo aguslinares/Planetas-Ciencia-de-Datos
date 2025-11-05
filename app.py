@@ -271,8 +271,9 @@ if menu == "Visualizaciones":
     st.caption("Fuente: Catálogo Kepler / columnas detectadas automáticamente por nombre.")
 
 if menu == "Predicción del modelo":
-    st.header("Predicción del modelo")
+    st.title("Predicción del modelo")
     
+
 
 
 
