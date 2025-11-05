@@ -9,6 +9,12 @@ st.set_page_config(page_title="KOI / Exoplanetas – Grupo 4", layout="wide")
 # Habilitar el transformador de datos VegaFusion para mejor rendimiento
 alt.data_transformers.enable("vegafusion")
 
+csv_path = st.sidebar.text_input("Ruta del CSV", value="Planetas_2025-10-21.csv")
+df = load_data(csv_path)
+
+find_col = make_colmap(df)
+menu = st.sidebar.radio("Secciones", ["Instroducción", "Visualizaciones", "Predicción del modelo"])
+
 # Función para normalizar nombres de columnas
 def norm(s):
     return re.sub(r"[^a-z0-9]+", "_", str(s).lower()).strip("_")
@@ -36,93 +42,118 @@ def find_col(candidates):
             if c in k and not k.startswith("fp_"):
                 return colmap[k]
     return None
-
-    # ---------------------------------------------------------------------
-    # Selección flexible de columnas típicas en un dataset de exoplanetas
-    # (usa lo que encuentre en TU archivo; si falta alguna, se adapta)
-    # ---------------------------------------------------------------------
-    name_col     = find_col(["pl_name","planet_name","name","planet", "nombre_kepler"])
-    mass_col     = find_col(["pl_mass","mass","planet_mass","mass_earth","mass_mj","m_sin_i"])
-    radius_col   = find_col(["pl_rade","radius","planet_radius","radius_earth","rad_re","rad", "radio_estelar"])
-    period_col   = find_col(["pl_orbper","orbital_period","period","per", "periodo_orbital_dias"])
-    sma_col      = find_col(["pl_orbsmax","semi_major_axis","sma","a"])
-    temp_col     = find_col(["pl_eqt","teq","temperature","equilibrium_temperature","temp", "temperatura_equilibrio_k"])
-    dist_col     = find_col(["sy_dist","st_dist","distance","star_distance","system_distance"])
-    method_col   = find_col(["discovery_method","disc_method","method"])
-    year_col     = find_col(["disc_year","discovery_year","year"])
-    host_teff    = find_col(["st_teff","host_star_temperature","star_temp", "temperatura_efectiva_estelar"])
-    host_metal   = find_col(["st_met","host_star_metallicity","metallicity"])
     
-    # Definir métricas para los ejes X e Y del gráfico A
-    y_metric = mass_col or radius_col or dist_col
-    x_metric = period_col or sma_col or dist_col
+    name_col   = find_col(["pl_name","planet_name","name","planet","nombre_kepler"])
+    mass_col   = find_col(["pl_mass","mass","planet_mass","mass_earth","mass_mj","m_sin_i"])
+    radius_col = find_col(["pl_rade","radius","planet_radius","radius_earth","rad_re","rad","radio_estelar"])
+    period_col = find_col(["pl_orbper","orbital_period","period","per","periodo_orbital_dias"])
+    sma_col    = find_col(["pl_orbsmax","semi_major_axis","sma","a"])
+    temp_col   = find_col(["pl_eqt","teq","temperature","equilibrium_temperature","temp","temperatura_equilibrio_k"])
+    dist_col   = find_col(["sy_dist","st_dist","distance","star_distance","system_distance"])
+    method_col = find_col(["discovery_method","disc_method","method"])
+    year_col   = find_col(["disc_year","discovery_year","year"])
+    disp_col   = find_col(["disposicion_final"])
+    koi_cnt    = find_col(["conteo_koi"])
     
-    # Convertir columnas a tipo numérico si es necesario y aplicar filtros básicos
-    cols_to_convert = [x_metric, y_metric, radius_col, mass_col, period_col, temp_col, dist_col]
-    for c in cols_to_convert:
-        if c is not None and c in df.columns and df[c].dtype == "O":
+    # num casts usados por los charts
+    for c in [period_col, sma_col, temp_col, dist_col, radius_col, mass_col]:
+        if c and df[c].dtype == "O":
             df[c] = pd.to_numeric(df[c], errors="coerce")
     
-    # ---------------------------------------------------------------------
-    # Chart A: Interactive bubble scatter (Period vs Mass/Radius)
-    # - X = period (or SMA / distance) in log
-    # - Y = mass (or radius / distance)
-    # - color = equilibrium temperature (if exists)
-    # - size = radius (if exists) or mass
-    # ---------------------------------------------------------------------
-    data_a = df.copy()
+    # Dropdown global de Disposición (con “(Todas)”)
+    opts = ["(Todas)"]
+    if disp_col:
+        opts += sorted(df[disp_col].dropna().unique().tolist())
+    p_dispo = alt.param(name="p_dispo", value="(Todas)",
+                        bind=alt.binding_select(options=opts, name="Disposición: "))
+    dispo_expr = f"(p_dispo == '(Todas)') || (datum.{disp_col} == p_dispo)" if disp_col else None
+
+if menu == "Introducción:
+    st.title("Introducción - Análisis de Exoplanetas")
+
+if menu == "Visualizaciones":
+    st.title("Dashboard KOI / Exoplanetas – Grupo 4")
+
     
-    # Base + filtros
-    base_a = alt.Chart(data_a)
+    # =======================
+    # Sección A - Scatter personalizable (Periodo vs otra métrica)
+    # =======================
+    # Mapa de métricas numéricas disponibles
+    metric_map = {
+        "Período (días)": period_col,
+        "Masa": mass_col,
+        "Radio": radius_col,
+        "Semieje mayor (UA)": sma_col,
+        "Distancia (pc)": dist_col,
+        "Temp. equilibrio (K)": temp_col,
+    }
+    metric_map = {k: v for k, v in metric_map.items() if v}
     
-    # Aplicar filtros solo si las columnas existen
-    if x_metric:
-        base_a = base_a.transform_filter(alt.datum[x_metric] > 0)
-    if y_metric:
-        base_a = base_a.transform_filter(alt.datum[y_metric] > 0)
+    # Controles en sidebar
+    st.sidebar.subheader("Gráfico A – Configuración")
+    default_x_key = next((k for k in ["Período (días)", "Semieje mayor (UA)", "Distancia (pc)"] if k in metric_map), list(metric_map.keys())[0])
+    default_y_key = next((k for k in ["Masa", "Radio", "Distancia (pc)", "Temp. equilibrio (K)"] if k in metric_map), list(metric_map.keys())[0])
     
-    # Codificación de tamaño (Radio o Masa)
-    size_enc = alt.value(80) # Tamaño por defecto
-    if radius_col and radius_col in df.columns:
-        size_enc = alt.Size(radius_col + ":Q", title="Radio", scale=alt.Scale(range=[20, 600]))
-    elif mass_col and mass_col in df.columns:
-        size_enc = alt.Size(mass_col + ":Q", title="Masa", scale=alt.Scale(range=[20, 600]))
+    x_key = st.sidebar.selectbox("Eje X", options=list(metric_map.keys()), index=list(metric_map.keys()).index(default_x_key))
+    y_key = st.sidebar.selectbox("Eje Y", options=list(metric_map.keys()), index=list(metric_map.keys()).index(default_y_key))
     
-    # Codificación de color (Temperatura de equilibrio)
-    color_enc = alt.value("#4C78A8") # Color por defecto
-    if temp_col and temp_col in df.columns:
-        color_enc = alt.Color(temp_col + ":Q", title="Temp. equilibrio (K)", scale=alt.Scale(scheme="turbo"))
+    use_log_x = st.sidebar.checkbox("Escala log X", value=True)
+    use_log_y = st.sidebar.checkbox("Escala log Y", value=True)
+    recortar_outliers = st.sidebar.checkbox("Recortar outliers (1–99%)", value=True)
     
-    # Tooltips
-    tooltip_cols = [c for c in [name_col, x_metric, y_metric, period_col, radius_col, mass_col, temp_col, dist_col, method_col, year_col] if c and c in df.columns]
-    tooltips = [alt.Tooltip(c, type="quantitative" if (df[c].dtype!=object) else "nominal", title=c) for c in tooltip_cols]
+    x_metric = metric_map[x_key]
+    y_metric = metric_map[y_key]
     
-    # Create a dropdown filter for 'disposicion_final'
-    disposition_dropdown = alt.binding_select(options=df['disposicion_final'].unique().tolist())
-    disposition_select = alt.selection_point(fields=['disposicion_final'], bind=disposition_dropdown, name="Filtrar por")
+    # Preparar datos y filtros
+    df_plot = df[[c for c in {x_metric, y_metric, name_col, period_col, radius_col, mass_col, temp_col, dist_col, method_col, year_col, disp_col} if c]].copy()
+    df_plot = df_plot.dropna(subset=[x_metric, y_metric])
+    if use_log_x:
+        df_plot = df_plot[df_plot[x_metric] > 0]
+    if use_log_y:
+        df_plot = df_plot[df_plot[y_metric] > 0]
     
-    # Creación del gráfico de dispersión
+    if recortar_outliers and not df_plot.empty:
+        qx1, qx9 = df_plot[x_metric].quantile([0.01, 0.99])
+        qy1, qy9 = df_plot[y_metric].quantile([0.01, 0.99])
+        df_plot = df_plot[df_plot[x_metric].between(qx1, qx9) & df_plot[y_metric].between(qy1, qy9)]
+    
+    # Encodings auxiliares
+    size_enc = alt.value(80)
+    if radius_col:
+        size_enc = alt.Size(f"{radius_col}:Q", title="Radio", scale=alt.Scale(range=[20, 500], clamp=True))
+    elif mass_col:
+        size_enc = alt.Size(f"{mass_col}:Q", title="Masa", scale=alt.Scale(range=[20, 500], clamp=True))
+    
+    color_enc = alt.value("#4C78A8")
+    if temp_col:
+        color_enc = alt.Color(f"{temp_col}:Q", title="Temp. equilibrio (K)", scale=alt.Scale(scheme="turbo"))
+    
+    tt_cols = [c for c in [name_col, x_metric, y_metric, period_col, radius_col, mass_col, temp_col, dist_col, method_col, year_col, disp_col] if c]
+    tooltips = [alt.Tooltip(c, type=("quantitative" if (c and df[c].dtype != object) else "nominal"), title=c) for c in tt_cols]
+    
+    x_scale = alt.Scale(type=("log" if use_log_x else "linear"))
+    y_scale = alt.Scale(type=("log" if use_log_y else "linear"))
+    
+    base_a = alt.Chart(df_plot)
+    
     scatter = (
-        base_a.mark_circle(opacity=0.5, stroke="black", strokeWidth=0.2)
+        base_a.mark_circle(opacity=0.55, stroke="black", strokeWidth=0.2)
         .encode(
-            x=alt.X(f"{x_metric}:Q", title=x_metric, scale=alt.Scale(type="log")) if x_metric else alt.X(""),
-            y=alt.Y(f"{y_metric}:Q", title=y_metric, scale=alt.Scale(type="log")) if y_metric else alt.Y(""),
+            x=alt.X(f"{x_metric}:Q", title=x_key, scale=x_scale),
+            y=alt.Y(f"{y_metric}:Q", title=y_key, scale=y_scale),
             color=color_enc,
             size=size_enc,
             tooltip=tooltips
         )
-        .properties(
-            title="A) Período orbital, Radio y Temperatura",
-            width=720, height=460
-        )
-        .add_params(disposition_select) # Add the filter to the chart
-        .transform_filter(disposition_select) # Apply the filter
-        .interactive()  # pan/zoom
+        .properties(title="A) Período orbital vs otra métrica (bubble)", height=480)
+        .add_params(p_dispo)
     )
     
-    chart_a = scatter
+    if dispo_expr:
+        scatter = scatter.transform_filter(dispo_expr)
     
-    chart_a
+    st.subheader("A) Período orbital vs Masa/Radio")
+    st.altair_chart(scatter.interactive(), use_container_width=True)
     
     # =======================
     # Sección B – Períodos: CANDIDATE vs CONFIRMED
@@ -247,6 +278,7 @@ def find_col(candidates):
 if menu == "Predicción del modelo":
     st.title("Predicción del modelo")
     
+
 
 
 
