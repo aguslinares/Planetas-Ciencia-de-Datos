@@ -9,8 +9,7 @@ st.set_page_config(page_title="KOI / Exoplanetas – Grupo 4", layout="wide")
 # Habilitar el transformador de datos VegaFusion para mejor rendimiento
 alt.data_transformers.enable("vegafusion")
 
-csv_path = st.sidebar.text_input("Ruta del CSV", value="Planetas_2025-10-21.csv")
-df = load_data(csv_path)
+df = pd.read_csv("Planetas_2025-10-21.csv")
 
 menu = st.sidebar.radio("Secciones", ["Instroducción", "Visualizaciones", "Predicción del modelo"])
 
@@ -278,6 +277,7 @@ if menu == "Visualizaciones":
 if menu == "Predicción del modelo":
     st.title("Predicción del modelo")
     
+
 
 
 
