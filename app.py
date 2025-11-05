@@ -12,8 +12,9 @@ alt.data_transformers.enable("vegafusion")
 csv_path = st.sidebar.text_input("Ruta del CSV", value="Planetas_2025-10-21.csv")
 df = load_data(csv_path)
 
-find_col = make_colmap(df)
 menu = st.sidebar.radio("Secciones", ["Instroducción", "Visualizaciones", "Predicción del modelo"])
+
+find_col = make_colmap(df)
 
 # Función para normalizar nombres de columnas
 def norm(s):
@@ -73,7 +74,6 @@ if menu == "Introducción":
 
 if menu == "Visualizaciones":
     st.title("Dashboard KOI / Exoplanetas – Grupo 4")
-
     
     # =======================
     # Sección A - Scatter personalizable (Periodo vs otra métrica)
@@ -278,6 +278,7 @@ if menu == "Visualizaciones":
 if menu == "Predicción del modelo":
     st.title("Predicción del modelo")
     
+
 
 
 
