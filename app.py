@@ -1,8 +1,25 @@
-import streamlit as st
+﻿import streamlit as st
 import pandas as pd
 import numpy as np
 import altair as alt
 import re
+import joblib
+from sklearn.base import BaseEstimator, TransformerMixin
+from pathlib import Path
+from streamlit_option_menu import option_menu
+
+# --- Necesario para deserializar model_final.pkl ---
+class DropColumns(BaseEstimator, TransformerMixin):
+    def __init__(self, columns_to_drop=None):
+        self.columns_to_drop = columns_to_drop or []
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        # igual a train_rf.py
+        to_drop = [c for c in self.columns_to_drop if c in X.columns]
+        return X.drop(columns=to_drop, errors="ignore")
 
 # =======================
 # CONFIGURACIÓN GENERAL
@@ -126,11 +143,24 @@ for c in [period_col, sma_col, temp_col, dist_col, radius_col, mass_col, prof_co
 # MENÚ LATERAL
 # =======================
 
-menu = st.sidebar.radio(
-    "Secciones",
-    ["Introducción","Columnas del dataset", "Visualizaciones", "Predicción del modelo" ],
-    index=0,
-)
+with st.sidebar:
+    menu = option_menu(
+        "Secciones",
+        ["Introducción", "Columnas del dataset", "Visualizaciones", "Predicción del modelo"],
+        icons=["house", "columns-gap", "bar-chart", "cpu"],
+        menu_icon="list",
+        default_index=0,
+        styles={
+            "container": {"padding": "0.5rem 0 0 0", "background-color": "transparent"},
+            "icon": {"color": "#60a5fa", "font-size": "16px"},
+            "nav-link": {
+                "font-size": "14px", "color": "#e5e7eb",
+                "padding": "10px", "border-radius": "12px", "margin": "6px 0",
+                "background-color": "rgba(148,163,184,.10)", "border": "1px solid rgba(148,163,184,.35)"
+            },
+            "nav-link-selected": {"background-color": "rgba(31,41,55,.75)", "color": "#f8fafc", "border": "1px solid rgba(255,255,255,.55)"},
+        }
+    )
 
 # =======================
 # SECCIÓN INTRODUCCIÓN
@@ -625,26 +655,284 @@ def viz_section() -> None:
 # =======================
 # SECCIÓN PREDICCIÓN (placeholder)
 # =======================
+# --- util: mapear T_eq(K) -> color HSL de forma suave ---
+def _clamp(v, vmin, vmax):
+    return max(vmin, min(vmax, v))
+
+def temp_to_hsl(teq_k: float, tmin: float = 150.0, tmax: float = 1500.0):
+    """
+    Mapea temperatura de equilibrio (K) a un color HSL continuo:
+    - frío → azul/celeste (h ≈ 200)
+    - templado → verdoso (h ≈ 140)
+    - caliente → anaranjado/rojo suave (h ≈ 20)
+    También ajusta leve el brillo para dar sensación de "más luminoso" si es más caliente.
+    """
+    if teq_k is None or np.isnan(teq_k):
+        teq_k = 288.0
+    teq_k = _clamp(float(teq_k), tmin, tmax)
+    x = (teq_k - tmin) / (tmax - tmin)           # 0..1
+
+    # Hue: 200 → 20 (azul→naranja)
+    h = 200 - 180 * x
+
+    # Saturation casi fija, un poco más saturado en calientes
+    s = 70 + 15 * x                               # 70..85
+
+    # Lightness más alto en calientes (pero sin quemar)
+    l = 48 + 10 * x                               # 48..58
+
+    return h, s, l
+
+def hsl_to_css(h, s, l):
+    return f"hsl({int(h)}, {int(s)}%, {int(l)}%)"
+def _planet_card(radius_earth: float | None, teq_k: float | None) -> None:
+    """
+    Planeta con tamaño ~ log(radio) y color ~ temperatura (HSL continuo),
+    manteniendo el brillo/glow animado.
+    """
+    r = max(0.4, min(15.0, (radius_earth or 1.0)))    # clamp 0.4–15 R⊕
+    size = int(28 * np.log1p(r) + 16)                 # escala log suave
+
+    h, s, l = temp_to_hsl(teq_k)
+    color = hsl_to_css(h, s, l)
+
+    # Glow: más intenso si está caliente
+    hot_factor = (float(teq_k or 288.0) - 150) / (1500 - 150)
+    hot_factor = _clamp(hot_factor, 0.0, 1.0)
+    glow_alpha = 0.35 + 0.25 * hot_factor            # 0.35..0.60
+    shadow = f"0 0 {24 + 8*hot_factor:.0f}px rgba(255,255,255,{glow_alpha:.2f})"
+
+    st.markdown(f"""
+    <style>
+    @keyframes pulse {{
+      0%   {{ transform: scale(1);   box-shadow: {shadow}; }}
+      50%  {{ transform: scale(1.05);box-shadow: 0 0 36px rgba(255,255,255,0.08), {shadow}; }}
+      100% {{ transform: scale(1);   box-shadow: {shadow}; }}
+    }}
+    .planet {{
+      width:{size}px;height:{size}px;border-radius:9999px;border:1px solid rgba(255,255,255,0.08);
+      /* brillo especular simple + color base HSL */
+      background:
+        radial-gradient(circle at 35% 30%, rgba(255,255,255,0.22), transparent 30%),
+        {color};
+      animation: pulse 2.8s ease-in-out infinite;
+      margin: 12px auto 6px auto;
+    }}
+    .planet-legend {{ text-align:center; color:#cbd5e1; font-size:0.9rem; }}
+    </style>
+    <div class="planet"></div>
+    <div class="planet-legend">Radio ≈ {r:.2f} R⊕ • T_eq ≈ {int(teq_k or 288)} K</div>
+    """, unsafe_allow_html=True)
+
+
+# Predicción del modelo
+
+@st.cache_resource
+def load_model(path: str = "model_final.pkl") -> BaseEstimator | None:
+    try:
+        # Ruta absoluta a partir del archivo app.py (ignora el cwd)
+        model_path = (Path(__file__).parent / path).resolve()
+        return joblib.load(model_path)
+    except Exception as e:
+        st.error(f"No pude cargar el modelo: {e}")  # muestra el motivo real
+        st.caption(f"Intenté en: {model_path}")
+        return None
 
 
 def model_section() -> None:
-    st.title("Predicción del modelo (borrador)")
-    st.markdown(
-        """
-        En esta sección se podría integrar un modelo de **Machine Learning** que,
-        a partir de variables físicas (período, radio, profundidad del tránsito, etc.),
-        estime por ejemplo:
+    st.title("Predicción del modelo")
 
-        - La probabilidad de que un KOI sea **planeta confirmado**.
-        - O la **clase** de disposición esperada (`CONFIRMED`, `CANDIDATE`, `FALSE POSITIVE`).
+    # 1) Cargar modelo (si existe)
+    model = load_model("model_final.pkl")
+    if model is None:
+        st.warning("No se encontró `model_final.pkl`. Podés seguir usando la UI; cuando subas el modelo, se activarán las predicciones.")
 
-        Flujo sugerido:
+    # 2) Elegir un KOI/planeta del dataset
+    id_display_col = name_koi or name_col or find_col(["nombre_koi","pl_name","planet_name","name"])
+    if id_display_col is None:
+        st.error("No pude detectar una columna de identificación (por ej. `nombre_koi` o `pl_name`).")
+        return
 
-        1. Entrenar un modelo (por ejemplo `RandomForestClassifier` o `XGBoost`) en un cuaderno aparte.
-        2. Guardar el modelo con `joblib`.
-        3. Cargarlo aquí y exponer un formulario para ingresar valores o seleccionar filas del dataset.
-        """
-    )
+    st.markdown("Seleccioná un objeto para **autocompletar** los campos y (si querés) ajustarlos antes de predecir.")
+    selected_id = st.selectbox("KOI / Planeta", options=sorted(df[id_display_col].dropna().astype(str).unique()))
+
+    row = df[df[id_display_col].astype(str) == str(selected_id)].head(1)
+    if row.empty:
+        st.info("No hay datos para el elemento seleccionado.")
+        return
+    row = row.iloc[0]
+
+    # 3) Campos clave (coincidir con los usados al entrenar)
+    _period = period_col or find_col(["periodo_orbital_dias","pl_orbper","period"])
+    _dur    = dur_col or find_col(["duracion_transito_horas"])
+    _depth  = prof_col or find_col(["profundidad_transito_ppm"])
+    _snr    = find_col(["snr_modelo","snr"])
+    _b      = find_col(["parametro_impacto"])
+    _rp_rs  = find_col(["radio_relativo_rp_rs"])
+    _rstar  = find_col(["radio_estelar_radios_solares"])
+    _teff   = find_col(["temperatura_efectiva_estrella_k"])
+    _logg   = find_col(["logg_estelar_cgs","logg"])
+    _feh    = find_col(["metallicidad_estelar_dex","feh"])
+    _ntr    = find_col(["numero_transitos"])
+    _teq    = temp_col or find_col(["temperatura_equilibrio_k","pl_eqt"])
+    _rpr    = radius_col or find_col(["radio_planeta_radios_tierra","pl_rade"])
+    _flags = {
+        "fp_no_transito": find_col(["fp_no_transito"]),
+        "fp_senal_estelar": find_col(["fp_senal_estelar"]),
+        "fp_desplazamiento_centroide": find_col(["fp_desplazamiento_centroide"]),
+        "fp_contaminacion_binaria_eclipsante": find_col(["fp_contaminacion_binaria_eclipsante"]),
+    }
+
+    def _num(c):
+        try:
+            return float(row[c]) if (c and c in df.columns and pd.notna(row[c])) else None
+        except Exception:
+            return None
+
+    period_v = _num(_period)
+    dur_v    = _num(_dur)
+    depth_v  = _num(_depth)
+    snr_v    = _num(_snr)
+    b_v      = _num(_b)
+    rprs_v   = _num(_rp_rs)
+    rstar_v  = _num(_rstar)
+    teff_v   = _num(_teff)
+    logg_v   = _num(_logg)
+    feh_v    = _num(_feh)
+    ntr_v    = _num(_ntr)
+    teq_v    = _num(_teq)
+    rpr_v    = _num(_rpr)
+    flags_v  = {k: int(row[v]) if (v and v in df.columns and pd.notna(row[v])) else 0 for k, v in _flags.items()}
+
+    # 4) UI de edición + planeta animado
+    st.subheader("Características del tránsito y del sistema (editable)")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        period_v = st.number_input("Período orbital (días)", min_value=0.0, value=float(period_v or 10.0), step=0.1)
+        dur_v    = st.number_input("Duración del tránsito (horas)", min_value=0.0, value=float(dur_v or 2.0), step=0.1)
+        depth_v  = st.number_input("Profundidad del tránsito (ppm)", min_value=0.0, value=float(depth_v or 500.0), step=1.0)
+    with c2:
+        rpr_v    = st.number_input("Radio del planeta (R⊕)", min_value=0.0, value=float(rpr_v or 1.0), step=0.1)
+        rprs_v   = st.number_input("Radio relativo (rp/rs)", min_value=0.0, value=float(rprs_v or 0.02), step=0.001, format="%.3f")
+        snr_v    = st.number_input("SNR del modelo", min_value=0.0, value=float(snr_v or 10.0), step=0.1)
+    with c3:
+        teq_v    = st.number_input("Temp. equilibrio (K)", min_value=0.0, value=float(teq_v or 300.0), step=1.0)
+        teff_v   = st.number_input("Temp. efectiva estrella (K)", min_value=0.0, value=float(teff_v or 5700.0), step=1.0)
+        rstar_v  = st.number_input("Radio estelar (R☉)", min_value=0.0, value=float(rstar_v or 1.0), step=0.01)
+
+    c4, c5, c6 = st.columns(3)
+    with c4:
+        logg_v = st.number_input("log g estelar (cgs)", value=float(logg_v or 4.4), step=0.01, format="%.2f")
+    with c5:
+        feh_v  = st.number_input("[Fe/H] (dex)", value=float(feh_v or 0.0), step=0.01, format="%.2f")
+    with c6:
+        b_v    = st.number_input("Parámetro de impacto (b)", min_value=0.0, max_value=1.5, value=float(b_v or 0.5), step=0.01)
+
+    st.markdown("**Flags de falso positivo (0/1)**")
+    f1, f2, f3, f4 = st.columns(4)
+    with f1:
+        flags_v["fp_no_transito"] = st.selectbox("No tránsito", [0,1], index=int(flags_v["fp_no_transito"]==1))
+    with f2:
+        flags_v["fp_senal_estelar"] = st.selectbox("Señal estelar", [0,1], index=int(flags_v["fp_senal_estelar"]==1))
+    with f3:
+        flags_v["fp_desplazamiento_centroide"] = st.selectbox("Desplaz. centroide", [0,1], index=int(flags_v["fp_desplazamiento_centroide"]==1))
+    with f4:
+        flags_v["fp_contaminacion_binaria_eclipsante"] = st.selectbox("Binaria eclipsante", [0,1], index=int(flags_v["fp_contaminacion_binaria_eclipsante"]==1))
+
+    # Tarjeta animada (usa tu _planet_card definido antes)
+    _planet_card(radius_earth=rpr_v, teq_k=teq_v)
+
+        # 5) Columnas esperadas por el modelo + overrides con lo editado en la UI
+
+    # (a) columnas que el modelo espera (orden exacto)
+    if hasattr(model, "feature_names_in_"):
+        expected_cols = list(model.feature_names_in_)
+    elif hasattr(model, "named_steps") and "preprocessing" in model.named_steps and \
+         hasattr(model.named_steps["preprocessing"], "feature_names_in_"):
+        expected_cols = list(model.named_steps["preprocessing"].feature_names_in_)
+    else:
+        # fallback: todas las columnas del CSV menos las de target
+        expected_cols = [c for c in df.columns if c not in
+                         ["disposicion_final", "disposicion_pipeline", "puntaje_confianza"]]
+
+    # (b) valores editados en la UI (solo los que te interesan)
+    overrides = {
+        "periodo_orbital_dias": period_v,
+        "duracion_transito_horas": dur_v,
+        "profundidad_transito_ppm": depth_v,
+        "snr_modelo": snr_v,
+        "parametro_impacto": b_v,
+        "radio_relativo_rp_rs": rprs_v,
+        "radio_estelar_radios_solares": rstar_v,
+        "temperatura_efectiva_estrella_k": teff_v,
+        "logg_estelar_cgs": logg_v,
+        "metallicidad_estelar_dex": feh_v,
+        "numero_transitos": ntr_v if ntr_v is not None else 3.0,
+        "temperatura_equilibrio_k": teq_v,
+        "radio_planeta_radios_tierra": rpr_v,
+        "fp_no_transito": int(flags_v["fp_no_transito"]),
+        "fp_senal_estelar": int(flags_v["fp_senal_estelar"]),
+        "fp_desplazamiento_centroide": int(flags_v["fp_desplazamiento_centroide"]),
+        "fp_contaminacion_binaria_eclipsante": int(flags_v["fp_contaminacion_binaria_eclipsante"]),
+    }
+
+    # (c) construir la fila completa tomando como base la del dataset
+    base = {}
+    for c in expected_cols:
+        base[c] = row[c] if c in row.index else np.nan
+
+    # (d) aplicar overrides editados (solo si existen en las columnas esperadas)
+    for k, v in overrides.items():
+        if k in expected_cols:
+            base[k] = v
+
+    # (e) DataFrame final con el ORDEN correcto de columnas
+    X_row = pd.DataFrame([base], columns=expected_cols)
+
+
+    
+    # 6) Predicción (sin umbral, sin barras)
+    c_left, c_right = st.columns([1,1])
+    with c_left:
+        predict_btn = st.button("🔭 Predecir disposición")
+
+    if predict_btn:
+        if model is None:
+            st.error("No se pudo predecir porque no está disponible el modelo (`model_final.pkl`).")
+        else:
+            try:
+                # 1) Etiqueta predicha directamente por el modelo
+                y_pred = model.predict(X_row)
+                label = str(y_pred[0])
+
+                # 2) Probabilidad (opcional) si el modelo la ofrece
+                prob_confirmed = None
+                if hasattr(model, "predict_proba"):
+                    # detectar clases donde estén guardadas
+                    if hasattr(model, "classes_"):
+                        classes = list(model.classes_)
+                    elif hasattr(model, "named_steps") and "model" in model.named_steps and hasattr(model.named_steps["model"], "classes_"):
+                        classes = list(model.named_steps["model"].classes_)
+                    else:
+                        classes = None
+
+                    if classes is not None and "CONFIRMED" in classes:
+                        idx_conf = classes.index("CONFIRMED")
+                        prob_confirmed = float(model.predict_proba(X_row)[0, idx_conf])
+
+                # 3) Mostrar resultado (sin gráficas)
+                if label.upper() == "CONFIRMED":
+                    st.success(f"**Resultado:** {label}")
+                else:
+                    st.info(f"**Resultado:** {label}")
+
+                # 4) Mostrar prob. de CONFIRMED si la tenemos (texto simple)
+                if prob_confirmed is not None:
+                    st.caption(f"Probabilidad estimada de **CONFIRMED**: {prob_confirmed:.3f}")
+
+            except Exception as e:
+                st.error(f"Ocurrió un error al predecir: {e}")
+
 
 
 def columns_section() -> None:
