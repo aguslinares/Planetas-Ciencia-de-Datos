@@ -537,7 +537,7 @@ def viz_section() -> None:
     # =======================
     # D) Tránsitos: profundidad vs duración + histograma linkeado  (snippet D)
     # =======================
-    st.subheader("D) Tránsitos (scatter + histograma linkeado)")
+    st.subheader("D) Tránsitos")
 
     required_cols_d = {
         "profundidad_transito_ppm",
