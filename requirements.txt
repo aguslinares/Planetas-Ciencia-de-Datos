@@ -5,4 +5,7 @@ numpy
 altair>=5.3
 vegafusion[embed]>=1.5.0
 vl-convert-python>=1.6.0
+scikit-learn
+
+
 
